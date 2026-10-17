@@ -26,6 +26,8 @@ static const float servoCloseTemp = 400;
 // Fan off below 50 C, full speed at 300 C
 static const float fanStartTemp = 50;
 static const float fanFullTemp = 300;
+// The motor doesn't start below this PWM duty, so once the fan is on it runs at fanMinDuty-100 %
+static const float fanMinDuty = 35;
 // Beep while the servo is fully open and the temperature has dropped by at least
 // dropThreshold C over the last DROP_WINDOW seconds
 static const int DROP_WINDOW = 300;
@@ -51,8 +53,6 @@ float tempHistory[DROP_WINDOW];
 int tempHistoryCount = 0;
 int tempHistoryIndex = 0;
 unsigned long lastDisplayUpdate = 0;
-unsigned long lastScreenChange = 0;
-int screen = 0;
 
 Mode pendingMode = MODE_AUTO;
 unsigned long pendingModeSince = 0;
@@ -80,7 +80,8 @@ void updateOutputs() {
   servo1.write(servoClosedAngle + (servoOpenAngle - servoClosedAngle) * servoPercent / 100);
 
   if (!isnan(temperature)) {
-    fanPercent = lroundf(100 * ramp(temperature, fanStartTemp, fanFullTemp));
+    float speed = ramp(temperature, fanStartTemp, fanFullTemp);
+    fanPercent = speed == 0 ? 0 : lroundf(fanMinDuty + (100 - fanMinDuty) * speed);
   }
   fanPwm.writeScaled(fanPercent / 100.0);
 }
@@ -108,26 +109,17 @@ void updateBeeper() {
 void printLine(int row, const String &text) {
   lcd->setCursor(0, row);
   lcd->print(text);
-  for (int i = text.length(); i < 16; i++) lcd->print(' ');
+  for (int i = text.length(); i < 20; i++) lcd->print(' ');
 }
 
-// Cycles through temperature, servo and fan, 2 s each
+// 20x4 display: temperature, servo, fan and mode on separate rows
 void updateDisplay() {
   if (lcd == nullptr) return;
-  if (millis() - lastScreenChange >= 2000) {
-    lastScreenChange = millis();
-    screen = (screen + 1) % 3;
-  }
-  if (screen == 0) {
-    printLine(0, "Temperature");
-    printLine(1, isnan(temperature) ? String("Sensor error") : String(temperature, 1) + " \xDF" "C");
-  } else if (screen == 1) {
-    printLine(0, String("Servo  ") + MODE_NAMES[mode]);
-    printLine(1, String(servoPercent) + " % open");
-  } else {
-    printLine(0, "Fan");
-    printLine(1, String(fanPercent) + " %");
-  }
+  printLine(0, isnan(temperature) ? String("Temp   Sensor error") : "Temp   " + String(temperature, 1) + " \xDF" "C");
+  printLine(1, "Servo  " + String(servoPercent) + " % open");
+  printLine(2, "Fan    " + String(fanPercent) + " %");
+  bool fireLow = servoPercent == 100 && temperatureDropping;
+  printLine(3, String("Mode   ") + MODE_NAMES[mode] + (fireLow ? "  FIRE LOW" : ""));
 }
 
 // The I2C adapter is at 0x27 or 0x3F depending on the manufacturer
@@ -138,7 +130,7 @@ void setupDisplay() {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
       Serial.printf("LCD found at 0x%02X\n", addr);
-      lcd = new DIYables_LCD_I2C(addr, 16, 2);
+      lcd = new DIYables_LCD_I2C(addr, 20, 4);
       lcd->init();
       lcd->backlight();
       return;
